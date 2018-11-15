@@ -8,18 +8,13 @@ Main view controller for the AR experience.
 import ARKit
 import SceneKit
 import UIKit
+import GameKit
 
-class ViewController: UIViewController, ARSessionDelegate {
+class ViewController: UIViewController, ARSessionDelegate, ARSCNViewDelegate {
     
     // MARK: Outlets
 
     @IBOutlet var sceneView: ARSCNView!
-
-    @IBOutlet weak var blurView: UIVisualEffectView!
-
-    lazy var statusViewController: StatusViewController = {
-        return childViewControllers.lazy.flatMap({ $0 as? StatusViewController }).first!
-    }()
 
     // MARK: Properties
 
@@ -27,36 +22,24 @@ class ViewController: UIViewController, ARSessionDelegate {
     var session: ARSession {
         return sceneView.session
     }
-
-    var nodeForContentType = [VirtualContentType: VirtualFaceNode]()
-    
     let contentUpdater = VirtualContentUpdater()
     
-    var selectedVirtualContent: VirtualContentType = .overlayModel {
-        didSet {
-            // Set the selected content based on the content type.
-            contentUpdater.virtualFaceNode = nodeForContentType[selectedVirtualContent]
-        }
-    }
+    private var game : Game?
 
     // MARK: - View Controller Life Cycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
         
-        sceneView.delegate = contentUpdater
+        sceneView.delegate = self
         sceneView.session.delegate = self
         sceneView.automaticallyUpdatesLighting = true
         
         createFaceGeometry()
-
-        // Set the initial face content, if any.
-        contentUpdater.virtualFaceNode = nodeForContentType[selectedVirtualContent]
-
-        // Hook up status view controller callback(s).
-        statusViewController.restartExperienceHandler = { [unowned self] in
-            self.restartExperience()
-        }
+        self.view.backgroundColor = UIColor(patternImage: UIImage(named: "background")!)
+        game = Game(sceneView: self.view)
+        game?.start()
+        
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -83,14 +66,6 @@ class ViewController: UIViewController, ARSessionDelegate {
     func createFaceGeometry() {
         // This relies on the earlier check of `ARFaceTrackingConfiguration.isSupported`.
         let device = sceneView.device!
-        let maskGeometry = ARSCNFaceGeometry(device: device)!
-        let glassesGeometry = ARSCNFaceGeometry(device: device)!
-        
-        nodeForContentType = [
-            .faceGeometry: Mask(geometry: maskGeometry),
-            .overlayModel: GlassesOverlay(geometry: glassesGeometry),
-            .blendShapeModel: RobotHead()
-        ]
     }
     
     // MARK: - ARSessionDelegate
@@ -112,16 +87,9 @@ class ViewController: UIViewController, ARSessionDelegate {
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
-        blurView.isHidden = false
-        statusViewController.showMessage("""
-        SESSION INTERRUPTED
-        The session will be reset after the interruption has ended.
-        """, autoHide: false)
     }
 
     func sessionInterruptionEnded(_ session: ARSession) {
-        blurView.isHidden = true
-        
         DispatchQueue.main.async {
             self.resetTracking()
         }
@@ -129,10 +97,9 @@ class ViewController: UIViewController, ARSessionDelegate {
     
     /// - Tag: ARFaceTrackingSetup
     func resetTracking() {
-        statusViewController.showMessage("STARTING A NEW SESSION")
-        
         guard ARFaceTrackingConfiguration.isSupported else { return }
         let configuration = ARFaceTrackingConfiguration()
+        sceneView.debugOptions = [ARSCNDebugOptions.showFeaturePoints]
         configuration.isLightEstimationEnabled = true
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     }
@@ -142,9 +109,7 @@ class ViewController: UIViewController, ARSessionDelegate {
     /// - Tag: restartExperience
     func restartExperience() {
         // Disable Restart button for a while in order to give the session enough time to restart.
-        statusViewController.isRestartExperienceButtonEnabled = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
-            self.statusViewController.isRestartExperienceButtonEnabled = true
         }
 
         resetTracking()
@@ -154,17 +119,69 @@ class ViewController: UIViewController, ARSessionDelegate {
     
     func displayErrorMessage(title: String, message: String) {
         // Blur the background.
-        blurView.isHidden = false
-        
         // Present an alert informing about the error that has occurred.
         let alertController = UIAlertController(title: title, message: message, preferredStyle: .alert)
         let restartAction = UIAlertAction(title: "Restart Session", style: .default) { _ in
             alertController.dismiss(animated: true, completion: nil)
-            self.blurView.isHidden = true
             self.resetTracking()
         }
         alertController.addAction(restartAction)
         present(alertController, animated: true, completion: nil)
+    }
+    
+    private var isTongueOut = false
+    private var isWinkingLeftEye = false
+    private var isWinkingRightEye = false
+    
+    /**
+     A reference to the node that was added by ARKit in `renderer(_:didAdd:for:)`.
+     - Tag: FaceNode
+     */
+    private var faceNode: SCNNode?
+    
+    /// - Tag: ARNodeTracking
+    func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
+        // Hold onto the `faceNode` so that the session does not need to be restarted when switching masks.
+        faceNode = node
+    }
+    
+    /// - Tag: ARFaceGeometryUpdate
+    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+        
+        guard let faceAnchor = anchor as? ARFaceAnchor else { return }
+        if #available(iOS 12.0, *) {
+            if (faceAnchor.blendShapes[ARFaceAnchor.BlendShapeLocation.tongueOut]!.doubleValue > 0.5) {
+                if (isTongueOut) {
+                    
+                } else {
+                    print("Stuck Tongue Out")
+                    isTongueOut = true
+                    game?.tongue()
+                }
+            } else {
+                isTongueOut = false
+            }
+            if (faceAnchor.blendShapes[ARFaceAnchor.BlendShapeLocation.eyeBlinkLeft]!.doubleValue > 0.7) {
+                if (!isWinkingLeftEye) {
+                    print("Right Eye Blink")
+                    isWinkingLeftEye = true
+                    game?.right()
+                }
+            } else {
+                isWinkingLeftEye = false
+            }
+            if (faceAnchor.blendShapes[ARFaceAnchor.BlendShapeLocation.eyeBlinkRight]!.doubleValue > 0.7) {
+                if (!isWinkingRightEye) {
+                    print("Left Eye Blink")
+                    isWinkingRightEye = true
+                    game?.left()
+                }
+            } else {
+                isWinkingRightEye = false
+            }
+        } else {
+            // Fallback on earlier versions
+        }
     }
 }
 
@@ -186,16 +203,5 @@ extension ViewController: UIPopoverPresentationControllerDelegate {
         guard let popoverController = segue.destination.popoverPresentationController, let button = sender as? UIButton else { return }
         popoverController.delegate = self
         popoverController.sourceRect = button.bounds
-
-        // Set up the view controller embedded in the popover.
-        let contentSelectionController = popoverController.presentedViewController as! ContentSelectionController
-
-        // Set the initially selected virtual content.
-        contentSelectionController.selectedVirtualContent = selectedVirtualContent
-
-        // Update our view controller's selected virtual content when the selection changes.
-        contentSelectionController.selectionHandler = { [unowned self] newSelectedVirtualContent in
-            self.selectedVirtualContent = newSelectedVirtualContent
-        }
     }
 }
